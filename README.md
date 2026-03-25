@@ -1,87 +1,88 @@
-# 8-bit CPU Emulator
+# CPU Emulator (8-bit)
 
-A custom 8-bit CPU emulator with stack operations, assembler support, and an interactive UI.
+An educational 8-bit CPU emulator with a built-in assembler and an interactive debugger-style UI.
 
-## Features
+## Preview
 
-- 256-byte RAM, byte-addressable
-- Registers: `PC`, `SP`, `A`, `B`, `IR`, `FLAGS`
-- Flags: Zero (`Z`), Carry (`C`), Negative (`N`)
-- Full fetch-decode-execute cycle
-- Phase control methods: `fetch_phase`, `decode_phase`, `execute_phase`
-- Stack and subroutine support using SP
-- Text assembler with labels, numeric literals, and directives
-- Interactive GUI with register/control/memory/debug panels
+![CPU Emulator UI](Visual%20CPU%20EMULATOR.png)
 
-## ISA and Opcodes
+## Highlights
 
-- `NOP` = `0x00`
-- `LDA [imm]` = `0x10`
-- `LDB [imm]` = `0x11`
-- `ADD B` = `0x20`
-- `SUB B` = `0x21`
-- `STA [addr]` = `0x30`
-- `JMP [addr]` = `0x40`
-- `JZ [addr]` = `0x41`
-- `PUSH A` = `0x50`
-- `PUSH B` = `0x51`
-- `POP A` = `0x52`
-- `POP B` = `0x53`
-- `CALL [addr]` = `0x60`
-- `RET` = `0x61`
-- `HLT` = `0xFF`
+- 256-byte, byte-addressable RAM
+- Registers: PC, SP, A, B, IR, FLAGS
+- Flags: Z (Zero), C (Carry), N (Negative)
+- Full fetch-decode-execute cycle support
+- Stack operations and subroutine flow (PUSH/POP, CALL/RET)
+- Assembler with labels plus .ORG and .EQU directives
+- Debugger UI with breakpoints, conditional breakpoints, trace, watches, and live disassembly
 
-## Files
+## Instruction Set
 
-- `cpu_emulator.py`: core CPU model and CLI test run
-- `assembler.py`: mnemonic assembler (`assemble`, `assemble_file`)
-- `program.asm`: example assembly source
-- `cpu_ui.py`: interactive UI layer on top of the core emulator
+- NOP = 0x00
+- LDA imm = 0x10
+- LDB imm = 0x11
+- ADD B = 0x20
+- SUB B = 0x21
+- STA addr = 0x30
+- JMP addr = 0x40
+- JZ addr = 0x41
+- PUSH A = 0x50
+- PUSH B = 0x51
+- POP A = 0x52
+- POP B = 0x53
+- CALL addr = 0x60
+- RET = 0x61
+- HLT = 0xFF
 
-## Run CLI Demo
+## Project Files
 
-```powershell
-python cpu_emulator.py
-```
+- cpu_emulator.py: CPU core, ISA execution, stack/call behavior
+- assembler.py: assembly parser and bytecode generator
+- cpu_ui.py: interactive emulator and debugger UI
+- program.asm: sample program source
 
-The default test program executes arithmetic through a subroutine and stores the final value at address `0x0F`.
+## Quick Start
 
-## Assemble Mnemonics
-
-Use Python directly:
-
-```powershell
-python -c "from assembler import assemble_file; print(assemble_file('program.asm'))"
-```
-
-Supported syntax:
-
-- Labels: `loop:`
-- Immediate and address values: `#10`, `0x0F`, `15`, `0b1010`
-- Constants: `.EQU NAME 0x0F`
-- Relocation: `.ORG 0x40`
-- Comments: `; this is a comment`
-- Data bytes: `DB 0x10 0xFF 20`
-
-## Run Interactive UI
+1. Create and activate a Python virtual environment (optional but recommended).
+2. Run the UI:
 
 ```powershell
 python cpu_ui.py
 ```
 
-UI controls include:
+3. In the UI, click ASSEMBLE + LOAD, then STEP or RUN.
 
-- `FETCH`, `DECODE`, `EXECUTE` (phase-by-phase stepping)
-- `STEP` (single full cycle)
-- `RUN` (continuous stepping)
-- `RUN TO ADDRESS` (run until PC reaches target)
-- `ASSEMBLE + LOAD` (compiles source editor into RAM)
-- `RESET` (clears RAM and registers)
+## Demo Workflow
 
-Debugger features include:
+1. Assemble default source with ASSEMBLE + LOAD.
+2. Use STEP to inspect each cycle.
+3. Add a breakpoint (for example 0x09) and click RUN.
+4. Add a conditional breakpoint (for example A==0x0C).
+5. Track watched memory addresses from the watch window.
+6. Use RUN TO ADDRESS to pause at a target PC.
 
-- Address breakpoints and double-click breakpoints in live disassembly
-- Conditional breakpoints (for example `A==0x0C`, `CYCLE>=10`, `Z==1`)
-- Stack window and memory watch window
-- Instruction trace (mnemonic + operands per executed cycle)
-- Live disassembly view around current PC
+## Assembler Notes
+
+Supported syntax examples:
+
+- Labels: loop:
+- Immediate values: #10, #0x0F
+- Numeric literals: 15, 0x0F, 0b1010
+- Constants: .EQU OUT_ADDR 0x0F
+- Relocation: .ORG 0x40
+- Data bytes: DB 0x10 0xFF 20
+- Comments: ; comment text
+
+Example command:
+
+```powershell
+python -c "from assembler import assemble_file; print(assemble_file('program.asm'))"
+```
+
+## CLI Mode
+
+For cycle dump output in terminal:
+
+```powershell
+python cpu_emulator.py
+```
