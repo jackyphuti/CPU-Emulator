@@ -10,10 +10,6 @@ An educational 8-bit CPU emulator with a built-in assembler and an interactive d
 
 ![CPU Emulator UI](Visual%20CPU%20EMULATOR.png)
 
-## Animated Demo
-
-Add your recording as `demo.gif` in the repository root, then this section will render automatically:
-
 ![CPU Emulator Animated Demo](demo.gif)
 
 ## Highlights
