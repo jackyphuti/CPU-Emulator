@@ -1,21 +1,29 @@
 from __future__ import annotations
 
+import os
 import re
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
+from typing import Optional, Tuple
 
 from assembler import AssemblerError, assemble
+from c_compiler import compile_c
 from cpu_emulator import CPU8Bit, FLAG_C, FLAG_N, FLAG_Z
 
-
-DEFAULT_ASM = """; Demo program using stack, constants, and relocation
+DEFAULT_ASM = """; Demo program: Add 7 + 5 with subroutine and MMIO output
 .EQU OUT_ADDR 0x0F
 .ORG 0x00
+
 start:
     LDA #7
     LDB #5
     CALL add_numbers
     STA OUT_ADDR
+
+    ; Output result to MMIO console
+    STA 0xF1             ; MMIO decimal number output
+    LDA #10              ; Newline '\n'
+    STA 0xF0             ; MMIO character output
     HLT
 
 add_numbers:
@@ -29,8 +37,9 @@ add_numbers:
 class EmulatorUI:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("8-bit CPU Emulator")
-        self.root.geometry("1440x900")
+        self.root.title("8-bit CPU Emulator & Debugger (Assembly + Mini-C)")
+        self.root.geometry("1480x940")
+        self.root.minsize(1280, 800)
         self.root.configure(bg="#0A0D14")
 
         self.cpu = CPU8Bit()
@@ -45,35 +54,59 @@ class EmulatorUI:
         self.conditional_breakpoint_raw: str | None = None
         self.conditional_breakpoint_rule: tuple[str, str, int] | None = None
 
+        # Speed settings: (delay_ms, cycles_per_tick)
+        self.speed_modes = {
+            "Slow (120ms)": (120, 1),
+            "Normal (20ms)": (20, 1),
+            "Fast (2ms)": (2, 5),
+            "Turbo (Max)": (1, 100),
+        }
+        self.current_speed = "Normal (20ms)"
+
+        # Editor mode: "asm" or "c"
+        self.editor_mode = "asm"
+
         self._build_layout()
         self._load_default_program()
 
     def _build_layout(self) -> None:
+        header = tk.Frame(self.root, bg="#0A0D14")
+        header.pack(fill="x", padx=16, pady=(10, 6))
+
         title = tk.Label(
-            self.root,
-            text="8-bit CPU Emulator",
+            header,
+            text="8-Bit CPU Emulator & Systems Debugger",
             bg="#0A0D14",
             fg="#E4E9F7",
-            font=("Consolas", 20, "bold"),
+            font=("Consolas", 18, "bold"),
         )
-        title.pack(pady=(14, 10))
+        title.pack(side="left")
+
+        subtitle = tk.Label(
+            header,
+            text="256-Byte RAM | Extended ISA | MMIO | Native C Core | Mini-C Compiler",
+            bg="#0A0D14",
+            fg="#7E92B5",
+            font=("Consolas", 10),
+        )
+        subtitle.pack(side="left", padx=16, pady=(4, 0))
 
         main = tk.Frame(self.root, bg="#0A0D14")
-        main.pack(fill="both", expand=True, padx=16, pady=8)
+        main.pack(fill="both", expand=True, padx=16, pady=4)
 
         left_col = self._build_register_panel(main)
-        left_col.pack(side="left", fill="both", padx=(0, 12), pady=4)
+        left_col.pack(side="left", fill="both", padx=(0, 8), pady=2)
 
         center_col = self._build_control_panel(main)
-        center_col.pack(side="left", fill="both", padx=12, pady=4)
+        center_col.pack(side="left", fill="both", padx=8, pady=2)
 
         right_col = self._build_memory_and_debug_panel(main)
-        right_col.pack(side="left", fill="both", expand=True, padx=(12, 0), pady=4)
+        right_col.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=2)
 
         bottom = self._build_source_panel(self.root)
-        bottom.pack(fill="x", padx=16, pady=(6, 14))
+        bottom.pack(fill="both", expand=True, padx=16, pady=(4, 10))
 
-    def _card_frame(self, parent: tk.Widget, title_text: str, width: int = 320, height: int = 360) -> tk.Frame:
+    def _card_frame(self, parent: tk.Widget, title_text: str, width: int = 300, height: int = 420) -> tk.Frame:
         card = tk.Frame(parent, bg="#121826", bd=1, relief="solid", width=width, height=height)
         card.pack_propagate(False)
 
@@ -82,18 +115,18 @@ class EmulatorUI:
             text=title_text,
             bg="#121826",
             fg="#D6DDF0",
-            font=("Consolas", 14, "bold"),
+            font=("Consolas", 13, "bold"),
         )
-        title.pack(pady=(12, 10))
+        title.pack(pady=(8, 6))
         return card
 
     def _build_register_panel(self, parent: tk.Widget) -> tk.Frame:
-        card = self._card_frame(parent, "REGISTERS", width=300, height=620)
+        card = self._card_frame(parent, "REGISTERS & CPU STATE", width=280, height=520)
 
         self.pc_var = tk.StringVar(value="PC: 0x00")
         self.sp_var = tk.StringVar(value="SP: 0xFF")
-        self.a_var = tk.StringVar(value="A: 0x00")
-        self.b_var = tk.StringVar(value="B: 0x00")
+        self.a_var = tk.StringVar(value="A: 0x00 (0)")
+        self.b_var = tk.StringVar(value="B: 0x00 (0)")
         self.ir_var = tk.StringVar(value="IR: --")
         self.flags_var = tk.StringVar(value="FLAGS [Z C N]: 0 0 0")
         self.cycle_var = tk.StringVar(value="Cycle: 0")
@@ -116,88 +149,109 @@ class EmulatorUI:
                 textvariable=variable,
                 bg="#0E1320",
                 fg="#F1F5FF",
-                font=("Consolas", 12, "bold"),
-                padx=10,
-                pady=7,
+                font=("Consolas", 11, "bold"),
+                padx=8,
+                pady=5,
                 anchor="w",
                 width=24,
             )
-            lbl.pack(pady=4, padx=14)
+            lbl.pack(pady=3, padx=12)
 
         meter_title = tk.Label(
             card,
-            text="CALL DEPTH METER",
+            text="CALL STACK DEPTH",
             bg="#121826",
             fg="#A9BCDD",
-            font=("Consolas", 10, "bold"),
+            font=("Consolas", 9, "bold"),
         )
-        meter_title.pack(pady=(10, 4))
+        meter_title.pack(pady=(6, 2))
 
-        self.call_depth_canvas = tk.Canvas(card, width=240, height=20, bg="#0E1320", highlightthickness=0)
-        self.call_depth_canvas.pack(pady=(0, 8))
-        self.call_depth_canvas.create_rectangle(0, 0, 240, 20, fill="#24314A", width=0)
-        self.call_depth_fill = self.call_depth_canvas.create_rectangle(0, 0, 0, 20, fill="#55D6BE", width=0)
+        self.call_depth_canvas = tk.Canvas(card, width=220, height=14, bg="#0E1320", highlightthickness=0)
+        self.call_depth_canvas.pack(pady=(0, 6))
+        self.call_depth_canvas.create_rectangle(0, 0, 220, 14, fill="#24314A", width=0)
+        self.call_depth_fill = self.call_depth_canvas.create_rectangle(0, 0, 0, 14, fill="#55D6BE", width=0)
+
+        # MMIO Ports Mini Monitor
+        mmio_box = tk.LabelFrame(card, text="MMIO PORTS", bg="#121826", fg="#A9BCDD", font=("Consolas", 9, "bold"))
+        mmio_box.pack(fill="x", padx=12, pady=(4, 6))
+
+        self.mmio_status_var = tk.StringVar(value="PUTC:0xF0 NUM:0xF1 HEX:0xF2")
+        tk.Label(
+            mmio_box,
+            textvariable=self.mmio_status_var,
+            bg="#0E1320",
+            fg="#8EE4AF",
+            font=("Consolas", 9),
+            padx=4,
+            pady=4,
+        ).pack(fill="x", padx=4, pady=4)
+
         return card
 
     def _build_control_panel(self, parent: tk.Widget) -> tk.Frame:
-        card = self._card_frame(parent, "CONTROL UNIT", width=380, height=620)
+        card = self._card_frame(parent, "CONTROL & DEBUGGER", width=330, height=520)
 
-        button_specs = [
-            ("FETCH", self.on_fetch),
-            ("DECODE", self.on_decode),
-            ("EXECUTE", self.on_execute),
-            ("STEP", self.on_step),
-            ("RUN", self.on_run),
-            ("RUN TO ADDRESS", self.on_run_to_address),
-            ("RESET", self.on_reset),
-            ("ASSEMBLE + LOAD", self.on_assemble_load),
-        ]
+        btn_grid = tk.Frame(card, bg="#121826")
+        btn_grid.pack(fill="x", padx=10, pady=2)
 
-        for label, callback in button_specs:
-            btn = tk.Button(
-                card,
-                text=label,
-                command=callback,
-                bg="#182136",
-                fg="#EAF1FF",
-                activebackground="#253654",
-                activeforeground="#FFFFFF",
-                font=("Consolas", 11, "bold"),
-                width=24,
-                relief="flat",
-                pady=6,
-            )
-            btn.pack(pady=4)
+        # Execution buttons
+        row1 = tk.Frame(btn_grid, bg="#121826")
+        row1.pack(fill="x", pady=2)
+        tk.Button(row1, text="STEP", command=self.on_step, bg="#2A3D66", fg="#FFFFFF", font=("Consolas", 10, "bold"), relief="flat", width=8).pack(side="left", padx=2)
+        tk.Button(row1, text="RUN", command=self.on_run, bg="#1B5E20", fg="#FFFFFF", font=("Consolas", 10, "bold"), relief="flat", width=8).pack(side="left", padx=2)
+        tk.Button(row1, text="RESET", command=self.on_reset, bg="#B71C1C", fg="#FFFFFF", font=("Consolas", 10, "bold"), relief="flat", width=8).pack(side="left", padx=2)
 
+        row2 = tk.Frame(btn_grid, bg="#121826")
+        row2.pack(fill="x", pady=2)
+        tk.Button(row2, text="FETCH", command=self.on_fetch, bg="#182136", fg="#EAF1FF", font=("Consolas", 9), relief="flat", width=8).pack(side="left", padx=2)
+        tk.Button(row2, text="DECODE", command=self.on_decode, bg="#182136", fg="#EAF1FF", font=("Consolas", 9), relief="flat", width=8).pack(side="left", padx=2)
+        tk.Button(row2, text="EXECUTE", command=self.on_execute, bg="#182136", fg="#EAF1FF", font=("Consolas", 9), relief="flat", width=8).pack(side="left", padx=2)
+
+        # Speed Selector
+        speed_row = tk.Frame(card, bg="#121826")
+        speed_row.pack(fill="x", padx=12, pady=(6, 2))
+        tk.Label(speed_row, text="Speed:", bg="#121826", fg="#B8C9E8", font=("Consolas", 9, "bold")).pack(side="left")
+        self.speed_combo = ttk.Combobox(speed_row, values=list(self.speed_modes.keys()), state="readonly", width=16)
+        self.speed_combo.set(self.current_speed)
+        self.speed_combo.bind("<<ComboboxSelected>>", self.on_speed_change)
+        self.speed_combo.pack(side="right")
+
+        # Breakpoints section
         debug_frame = tk.Frame(card, bg="#121826")
-        debug_frame.pack(fill="x", padx=14, pady=(8, 4))
+        debug_frame.pack(fill="x", padx=12, pady=(4, 2))
 
-        tk.Label(debug_frame, text="Breakpoint Addr (hex/dec)", bg="#121826", fg="#B8C9E8", font=("Consolas", 10, "bold")).pack(anchor="w")
-        self.breakpoint_entry = tk.Entry(debug_frame, bg="#0E1320", fg="#EAF1FF", insertbackground="#FFFFFF", font=("Consolas", 10), relief="flat")
-        self.breakpoint_entry.pack(fill="x", pady=(4, 6))
-        bp_btn_row = tk.Frame(debug_frame, bg="#121826")
-        bp_btn_row.pack(fill="x")
-        tk.Button(bp_btn_row, text="ADD BP", command=self.on_add_breakpoint, bg="#24324D", fg="#EAF1FF", font=("Consolas", 10, "bold"), relief="flat").pack(side="left", padx=(0, 6))
-        tk.Button(bp_btn_row, text="DEL BP", command=self.on_remove_breakpoint, bg="#24324D", fg="#EAF1FF", font=("Consolas", 10, "bold"), relief="flat").pack(side="left", padx=(0, 6))
-        tk.Button(bp_btn_row, text="CLEAR", command=self.on_clear_breakpoints, bg="#24324D", fg="#EAF1FF", font=("Consolas", 10, "bold"), relief="flat").pack(side="left")
+        tk.Label(debug_frame, text="Breakpoint Addr (hex/dec):", bg="#121826", fg="#B8C9E8", font=("Consolas", 9, "bold")).pack(anchor="w")
+        bp_row = tk.Frame(debug_frame, bg="#121826")
+        bp_row.pack(fill="x", pady=(2, 4))
+        self.breakpoint_entry = tk.Entry(bp_row, bg="#0E1320", fg="#EAF1FF", insertbackground="#FFFFFF", font=("Consolas", 9), width=10, relief="flat")
+        self.breakpoint_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        tk.Button(bp_row, text="ADD", command=self.on_add_breakpoint, bg="#24324D", fg="#EAF1FF", font=("Consolas", 9, "bold"), relief="flat").pack(side="left", padx=(0, 2))
+        tk.Button(bp_row, text="DEL", command=self.on_remove_breakpoint, bg="#24324D", fg="#EAF1FF", font=("Consolas", 9), relief="flat").pack(side="left", padx=(0, 2))
+        tk.Button(bp_row, text="CLR", command=self.on_clear_breakpoints, bg="#24324D", fg="#EAF1FF", font=("Consolas", 9), relief="flat").pack(side="left")
 
-        tk.Label(debug_frame, text="Conditional Breakpoint", bg="#121826", fg="#B8C9E8", font=("Consolas", 10, "bold")).pack(anchor="w", pady=(10, 0))
-        self.cond_bp_entry = tk.Entry(debug_frame, bg="#0E1320", fg="#EAF1FF", insertbackground="#FFFFFF", font=("Consolas", 10), relief="flat")
-        self.cond_bp_entry.pack(fill="x", pady=(4, 6))
-        cond_btn_row = tk.Frame(debug_frame, bg="#121826")
-        cond_btn_row.pack(fill="x")
-        tk.Button(cond_btn_row, text="SET", command=self.on_set_conditional_breakpoint, bg="#24324D", fg="#EAF1FF", font=("Consolas", 10, "bold"), relief="flat").pack(side="left", padx=(0, 6))
-        tk.Button(cond_btn_row, text="CLEAR", command=self.on_clear_conditional_breakpoint, bg="#24324D", fg="#EAF1FF", font=("Consolas", 10, "bold"), relief="flat").pack(side="left")
+        # Conditional Breakpoint
+        tk.Label(debug_frame, text="Conditional BP (e.g. A==0x0C):", bg="#121826", fg="#B8C9E8", font=("Consolas", 9, "bold")).pack(anchor="w", pady=(4, 0))
+        cond_row = tk.Frame(debug_frame, bg="#121826")
+        cond_row.pack(fill="x", pady=(2, 4))
+        self.cond_bp_entry = tk.Entry(cond_row, bg="#0E1320", fg="#EAF1FF", insertbackground="#FFFFFF", font=("Consolas", 9), relief="flat")
+        self.cond_bp_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        tk.Button(cond_row, text="SET", command=self.on_set_conditional_breakpoint, bg="#24324D", fg="#EAF1FF", font=("Consolas", 9, "bold"), relief="flat").pack(side="left", padx=(0, 2))
+        tk.Button(cond_row, text="CLR", command=self.on_clear_conditional_breakpoint, bg="#24324D", fg="#EAF1FF", font=("Consolas", 9), relief="flat").pack(side="left")
 
-        tk.Label(debug_frame, text="Run-To Addr (hex/dec)", bg="#121826", fg="#B8C9E8", font=("Consolas", 10, "bold")).pack(anchor="w", pady=(10, 0))
-        self.run_to_entry = tk.Entry(debug_frame, bg="#0E1320", fg="#EAF1FF", insertbackground="#FFFFFF", font=("Consolas", 10), relief="flat")
-        self.run_to_entry.pack(fill="x", pady=(4, 0))
+        # Run-To Address
+        runto_row = tk.Frame(debug_frame, bg="#121826")
+        runto_row.pack(fill="x", pady=(2, 4))
+        tk.Label(runto_row, text="Run to PC:", bg="#121826", fg="#B8C9E8", font=("Consolas", 9, "bold")).pack(side="left")
+        self.run_to_entry = tk.Entry(runto_row, bg="#0E1320", fg="#EAF1FF", insertbackground="#FFFFFF", font=("Consolas", 9), width=8, relief="flat")
+        self.run_to_entry.pack(side="left", padx=4)
+        tk.Button(runto_row, text="GO", command=self.on_run_to_address, bg="#24324D", fg="#EAF1FF", font=("Consolas", 9, "bold"), relief="flat").pack(side="left")
 
+        # Status text
         self.breakpoint_list_var = tk.StringVar(value="Breakpoints: (none)")
-        tk.Label(card, textvariable=self.breakpoint_list_var, bg="#121826", fg="#8FA7CF", font=("Consolas", 10), wraplength=340, justify="left").pack(padx=16, pady=(4, 0), anchor="w")
+        tk.Label(card, textvariable=self.breakpoint_list_var, bg="#121826", fg="#8FA7CF", font=("Consolas", 9), wraplength=300, justify="left").pack(padx=12, pady=(2, 0), anchor="w")
 
         self.cond_bp_var = tk.StringVar(value="Conditional BP: (none)")
-        tk.Label(card, textvariable=self.cond_bp_var, bg="#121826", fg="#8FA7CF", font=("Consolas", 10), wraplength=340, justify="left").pack(padx=16, pady=(4, 0), anchor="w")
+        tk.Label(card, textvariable=self.cond_bp_var, bg="#121826", fg="#8FA7CF", font=("Consolas", 9), wraplength=300, justify="left").pack(padx=12, pady=(2, 0), anchor="w")
 
         self.status_var = tk.StringVar(value="Ready")
         self.status_label = tk.Label(
@@ -205,79 +259,146 @@ class EmulatorUI:
             textvariable=self.status_var,
             bg="#121826",
             fg="#7FD7B9",
-            font=("Consolas", 11, "bold"),
-            wraplength=340,
+            font=("Consolas", 10, "bold"),
+            wraplength=300,
             justify="left",
         )
-        self.status_label.pack(padx=16, pady=(10, 0), anchor="w")
+        self.status_label.pack(padx=12, pady=(6, 0), anchor="w")
+
         return card
 
     def _build_memory_and_debug_panel(self, parent: tk.Widget) -> tk.Frame:
-        card = self._card_frame(parent, "RAM + DEBUG VIEW", width=730, height=620)
+        card = self._card_frame(parent, "RAM (256 BYTES) & DIAGNOSTICS VIEW", width=820, height=520)
 
+        # Upper: RAM Hex Dump
         self.ram_text = tk.Text(
             card,
-            height=11,
+            height=9,
             width=84,
             bg="#0A101C",
             fg="#DCE6FF",
             insertbackground="#FFFFFF",
-            font=("Consolas", 11),
+            font=("Consolas", 10),
             relief="flat",
             bd=0,
-            padx=10,
-            pady=10,
+            padx=8,
+            pady=6,
         )
-        self.ram_text.pack(padx=12, pady=(8, 6), fill="x")
+        self.ram_text.pack(padx=10, pady=(4, 4), fill="x")
         self.ram_text.config(state="disabled")
 
+        # Lower split: Stack/Watch | TTY Console | Trace | Disassembly
         lower = tk.Frame(card, bg="#121826")
-        lower.pack(fill="both", expand=True, padx=12, pady=(2, 10))
+        lower.pack(fill="both", expand=True, padx=10, pady=(2, 6))
 
-        stack_watch_frame = tk.Frame(lower, bg="#121826")
-        stack_watch_frame.pack(side="left", fill="both", expand=True, padx=(0, 4))
+        # 1. Stack & Watch
+        stack_frame = tk.Frame(lower, bg="#121826", width=180)
+        stack_frame.pack(side="left", fill="both", expand=True, padx=(0, 4))
 
-        tk.Label(stack_watch_frame, text="STACK WINDOW", bg="#121826", fg="#D6DDF0", font=("Consolas", 10, "bold")).pack(anchor="w")
-        self.stack_text = tk.Text(stack_watch_frame, height=8, bg="#0A101C", fg="#DCE6FF", font=("Consolas", 10), relief="flat", bd=0, padx=8, pady=8)
-        self.stack_text.pack(fill="both", expand=True, pady=(4, 6))
+        tk.Label(stack_frame, text="STACK VIEW", bg="#121826", fg="#D6DDF0", font=("Consolas", 9, "bold")).pack(anchor="w")
+        self.stack_text = tk.Text(stack_frame, height=5, bg="#0A101C", fg="#DCE6FF", font=("Consolas", 9), relief="flat", bd=0, padx=4, pady=4)
+        self.stack_text.pack(fill="both", expand=True, pady=(2, 4))
         self.stack_text.config(state="disabled")
 
-        tk.Label(stack_watch_frame, text="WATCH WINDOW", bg="#121826", fg="#D6DDF0", font=("Consolas", 10, "bold")).pack(anchor="w")
-        watch_ctrl = tk.Frame(stack_watch_frame, bg="#121826")
-        watch_ctrl.pack(fill="x", pady=(4, 4))
-        self.watch_entry = tk.Entry(watch_ctrl, bg="#0E1320", fg="#EAF1FF", insertbackground="#FFFFFF", font=("Consolas", 10), relief="flat")
-        self.watch_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        tk.Button(watch_ctrl, text="+", command=self.on_add_watch, bg="#24324D", fg="#EAF1FF", font=("Consolas", 10, "bold"), relief="flat", width=3).pack(side="left", padx=(0, 4))
-        tk.Button(watch_ctrl, text="-", command=self.on_remove_watch, bg="#24324D", fg="#EAF1FF", font=("Consolas", 10, "bold"), relief="flat", width=3).pack(side="left", padx=(0, 4))
-        tk.Button(watch_ctrl, text="C", command=self.on_clear_watch, bg="#24324D", fg="#EAF1FF", font=("Consolas", 10, "bold"), relief="flat", width=3).pack(side="left")
+        tk.Label(stack_frame, text="WATCHES (+/-/C)", bg="#121826", fg="#D6DDF0", font=("Consolas", 9, "bold")).pack(anchor="w")
+        w_ctrl = tk.Frame(stack_frame, bg="#121826")
+        w_ctrl.pack(fill="x", pady=(2, 2))
+        self.watch_entry = tk.Entry(w_ctrl, bg="#0E1320", fg="#EAF1FF", font=("Consolas", 9), width=6, relief="flat")
+        self.watch_entry.pack(side="left", fill="x", expand=True, padx=(0, 2))
+        tk.Button(w_ctrl, text="+", command=self.on_add_watch, bg="#24324D", fg="#EAF1FF", font=("Consolas", 8, "bold"), relief="flat", width=2).pack(side="left", padx=1)
+        tk.Button(w_ctrl, text="-", command=self.on_remove_watch, bg="#24324D", fg="#EAF1FF", font=("Consolas", 8, "bold"), relief="flat", width=2).pack(side="left", padx=1)
+        tk.Button(w_ctrl, text="C", command=self.on_clear_watch, bg="#24324D", fg="#EAF1FF", font=("Consolas", 8, "bold"), relief="flat", width=2).pack(side="left")
 
-        self.watch_text = tk.Text(stack_watch_frame, height=5, bg="#0A101C", fg="#BEE8FF", font=("Consolas", 10), relief="flat", bd=0, padx=8, pady=8)
+        self.watch_text = tk.Text(stack_frame, height=4, bg="#0A101C", fg="#BEE8FF", font=("Consolas", 9), relief="flat", bd=0, padx=4, pady=4)
         self.watch_text.pack(fill="both", expand=True)
         self.watch_text.config(state="disabled")
 
-        trace_frame = tk.Frame(lower, bg="#121826")
-        trace_frame.pack(side="left", fill="both", expand=True, padx=(4, 4))
-        tk.Label(trace_frame, text="INSTRUCTION TRACE", bg="#121826", fg="#D6DDF0", font=("Consolas", 10, "bold")).pack(anchor="w")
-        self.trace_text = tk.Text(trace_frame, height=16, bg="#0A101C", fg="#EEDDA8", font=("Consolas", 10), relief="flat", bd=0, padx=8, pady=8)
-        self.trace_text.pack(fill="both", expand=True, pady=(4, 0))
+        # 2. TTY Console Output (MMIO 0xF0, 0xF1, 0xF2)
+        console_frame = tk.Frame(lower, bg="#121826", width=200)
+        console_frame.pack(side="left", fill="both", expand=True, padx=4)
+
+        con_header = tk.Frame(console_frame, bg="#121826")
+        con_header.pack(fill="x")
+        tk.Label(con_header, text="TTY CONSOLE (MMIO)", bg="#121826", fg="#55D6BE", font=("Consolas", 9, "bold")).pack(side="left")
+        tk.Button(con_header, text="CLR", command=self.on_clear_console, bg="#24324D", fg="#EAF1FF", font=("Consolas", 8), relief="flat").pack(side="right")
+
+        self.console_text = tk.Text(console_frame, height=10, bg="#050B14", fg="#A8FFB2", font=("Consolas", 9), relief="flat", bd=0, padx=6, pady=6)
+        self.console_text.pack(fill="both", expand=True, pady=(2, 0))
+        self.console_text.config(state="disabled")
+
+        # 3. Instruction Trace
+        trace_frame = tk.Frame(lower, bg="#121826", width=190)
+        trace_frame.pack(side="left", fill="both", expand=True, padx=4)
+        tk.Label(trace_frame, text="INSTRUCTION TRACE", bg="#121826", fg="#D6DDF0", font=("Consolas", 9, "bold")).pack(anchor="w")
+        self.trace_text = tk.Text(trace_frame, height=10, bg="#0A101C", fg="#EEDDA8", font=("Consolas", 9), relief="flat", bd=0, padx=4, pady=4)
+        self.trace_text.pack(fill="both", expand=True, pady=(2, 0))
         self.trace_text.config(state="disabled")
 
-        disasm_frame = tk.Frame(lower, bg="#121826")
+        # 4. Live Disassembly
+        disasm_frame = tk.Frame(lower, bg="#121826", width=210)
         disasm_frame.pack(side="left", fill="both", expand=True, padx=(4, 0))
-        tk.Label(disasm_frame, text="LIVE DISASSEMBLY", bg="#121826", fg="#D6DDF0", font=("Consolas", 10, "bold")).pack(anchor="w")
-        tk.Label(disasm_frame, text="Double-click line to toggle breakpoint", bg="#121826", fg="#8FA7CF", font=("Consolas", 9)).pack(anchor="w")
-        self.disasm_text = tk.Text(disasm_frame, height=16, bg="#0A101C", fg="#BDE4A8", font=("Consolas", 10), relief="flat", bd=0, padx=8, pady=8)
-        self.disasm_text.pack(fill="both", expand=True, pady=(4, 0))
+        tk.Label(disasm_frame, text="LIVE DISASSEMBLY", bg="#121826", fg="#D6DDF0", font=("Consolas", 9, "bold")).pack(anchor="w")
+        self.disasm_text = tk.Text(disasm_frame, height=10, bg="#0A101C", fg="#BDE4A8", font=("Consolas", 9), relief="flat", bd=0, padx=4, pady=4)
+        self.disasm_text.pack(fill="both", expand=True, pady=(2, 0))
         self.disasm_text.config(state="disabled")
         self.disasm_text.bind("<Double-Button-1>", self.on_toggle_breakpoint_from_disasm)
+
         return card
 
     def _build_source_panel(self, parent: tk.Widget) -> tk.Frame:
         frame = tk.Frame(parent, bg="#0A0D14")
-        tk.Label(frame, text="Assembly Source", bg="#0A0D14", fg="#D6DDF0", font=("Consolas", 13, "bold")).pack(anchor="w")
+
+        # Top tool bar of source editor
+        bar = tk.Frame(frame, bg="#0A0D14")
+        bar.pack(fill="x", pady=(2, 4))
+
+        self.editor_title_var = tk.StringVar(value="Assembly Source Editor")
+        tk.Label(bar, textvariable=self.editor_title_var, bg="#0A0D14", fg="#D6DDF0", font=("Consolas", 12, "bold")).pack(side="left")
+
+        # Mode toggles
+        tk.Button(bar, text="ASM Mode", command=lambda: self.set_editor_mode("asm"), bg="#182136", fg="#EAF1FF", font=("Consolas", 9, "bold"), relief="flat").pack(side="left", padx=(16, 4))
+        tk.Button(bar, text="Mini-C Mode", command=lambda: self.set_editor_mode("c"), bg="#182136", fg="#EAF1FF", font=("Consolas", 9, "bold"), relief="flat").pack(side="left", padx=4)
+
+        # Examples Dropdown
+        tk.Label(bar, text="Load Example:", bg="#0A0D14", fg="#A9BCDD", font=("Consolas", 9, "bold")).pack(side="left", padx=(20, 6))
+
+        self.examples_map = {
+            "Select an Example...": "",
+            "01: Basic Addition & MMIO (ASM)": "examples/01_addition.asm",
+            "02: Fibonacci Sequence (ASM)": "examples/02_fibonacci.asm",
+            "03: Software Multiplier (ASM)": "examples/03_multiplier.asm",
+            "04: In-Place Bubble Sort (ASM)": "examples/04_bubble_sort.asm",
+            "05: Hello World String (ASM)": "examples/05_hello_world.asm",
+            "06: Factorial Calculator (ASM)": "examples/06_factorial.asm",
+            "07: Bitwise Logic & Shifts (ASM)": "examples/07_bitwise_demo.asm",
+            "08: Fibonacci Sequence (Mini-C)": "examples/c_programs/fibonacci.c",
+            "09: Array Summation (Mini-C)": "examples/c_programs/sum_array.c",
+            "10: Counter Loop (Mini-C)": "examples/c_programs/counter.c",
+        }
+
+        self.example_combo = ttk.Combobox(bar, values=list(self.examples_map.keys()), state="readonly", width=34)
+        self.example_combo.set("Select an Example...")
+        self.example_combo.bind("<<ComboboxSelected>>", self.on_select_example)
+        self.example_combo.pack(side="left")
+
+        # Primary Action Button (Assemble+Load or Compile C+Load)
+        self.action_btn_text = tk.StringVar(value="ASSEMBLE + LOAD")
+        self.action_btn = tk.Button(
+            bar,
+            textvariable=self.action_btn_text,
+            command=self.on_assemble_or_compile,
+            bg="#2E7D32",
+            fg="#FFFFFF",
+            font=("Consolas", 10, "bold"),
+            relief="flat",
+            padx=10,
+        )
+        self.action_btn.pack(side="right", padx=(8, 0))
+
+        # Text editor
         self.source_text = tk.Text(
             frame,
-            height=10,
+            height=9,
             bg="#0A101C",
             fg="#E6EEFF",
             insertbackground="#FFFFFF",
@@ -285,15 +406,59 @@ class EmulatorUI:
             relief="flat",
             bd=0,
             padx=10,
-            pady=10,
+            pady=8,
         )
-        self.source_text.pack(fill="x", pady=(6, 0))
+        self.source_text.pack(fill="both", expand=True)
         return frame
+
+    def set_editor_mode(self, mode: str) -> None:
+        self.editor_mode = mode
+        if mode == "c":
+            self.editor_title_var.set("Mini-C Source Code Editor")
+            self.action_btn_text.set("COMPILE C & LOAD")
+            self.action_btn.configure(bg="#1565C0")
+        else:
+            self.editor_title_var.set("Assembly Source Code Editor")
+            self.action_btn_text.set("ASSEMBLE + LOAD")
+            self.action_btn.configure(bg="#2E7D32")
+
+    def on_speed_change(self, event: tk.Event | None = None) -> None:
+        self.current_speed = self.speed_combo.get()
+        self._set_status(f"Execution speed set to: {self.current_speed}")
+
+    def on_select_example(self, event: tk.Event | None = None) -> None:
+        selected = self.example_combo.get()
+        path = self.examples_map.get(selected, "")
+        if not path or not os.path.exists(path):
+            return
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            self.source_text.delete("1.0", tk.END)
+            self.source_text.insert("1.0", content)
+
+            if path.endswith(".c"):
+                self.set_editor_mode("c")
+            else:
+                self.set_editor_mode("asm")
+
+            self._set_status(f"Loaded example: {selected}")
+            self.on_assemble_or_compile()
+        except Exception as exc:
+            self._set_status(f"Failed to load example: {exc}", is_error=True)
+
+    def on_clear_console(self) -> None:
+        self.cpu.io_output.clear()
+        self.console_text.config(state="normal")
+        self.console_text.delete("1.0", tk.END)
+        self.console_text.config(state="disabled")
 
     def _load_default_program(self) -> None:
         self.source_text.delete("1.0", tk.END)
         self.source_text.insert("1.0", DEFAULT_ASM)
-        self.on_assemble_load()
+        self.on_assemble_or_compile()
 
     def _parse_address(self, text: str) -> int:
         token = text.strip()
@@ -311,7 +476,7 @@ class EmulatorUI:
     def _record_trace(self, address: int) -> None:
         cycle_idx = max(0, self.cpu.cycles - 1)
         text = self.cpu.decode_instruction_at(self.cpu.ram, address)
-        self.trace_lines.append(f"C{cycle_idx:03d} @0x{address:02X}: {text}")
+        self.trace_lines.append(f"C{cycle_idx:04d} @0x{address:02X}: {text}")
         if len(self.trace_lines) > self.trace_limit:
             self.trace_lines = self.trace_lines[-self.trace_limit :]
 
@@ -398,21 +563,24 @@ class EmulatorUI:
     def refresh_ui(self) -> None:
         self.pc_var.set(f"PC: 0x{self.cpu.pc:02X}")
         self.sp_var.set(f"SP: 0x{self.cpu.sp:02X}")
-        self.a_var.set(f"A: 0x{self.cpu.a:02X}")
-        self.b_var.set(f"B: 0x{self.cpu.b:02X}")
+        self.a_var.set(f"A: 0x{self.cpu.a:02X} ({self.cpu.a})")
+        self.b_var.set(f"B: 0x{self.cpu.b:02X} ({self.cpu.b})")
         self.ir_var.set("IR: --" if self.cpu.ir is None else f"IR: 0x{self.cpu.ir:02X}")
-        self.flags_var.set(f"FLAGS [Z C N]: {int(self.cpu.get_flag(FLAG_Z))} {int(self.cpu.get_flag(FLAG_C))} {int(self.cpu.get_flag(FLAG_N))}")
+        self.flags_var.set(
+            f"FLAGS [Z C N]: {int(self.cpu.get_flag(FLAG_Z))} {int(self.cpu.get_flag(FLAG_C))} {int(self.cpu.get_flag(FLAG_N))}"
+        )
         self.cycle_var.set(f"Cycle: {self.cpu.cycles}")
         self.call_depth_var.set(f"Call Depth: {self.cpu.call_depth}")
         self.stack_depth_var.set(f"Stack Depth: {self.cpu.stack_depth}")
 
         depth_ratio = min(1.0, self.cpu.call_depth / 16) if self.cpu.call_depth > 0 else 0.0
-        self.call_depth_canvas.coords(self.call_depth_fill, 0, 0, int(240 * depth_ratio), 20)
+        self.call_depth_canvas.coords(self.call_depth_fill, 0, 0, int(220 * depth_ratio), 14)
 
         bp_text = " ".join(f"0x{addr:02X}" for addr in sorted(self.breakpoints))
         self.breakpoint_list_var.set(f"Breakpoints: {bp_text if bp_text else '(none)'}")
         self.cond_bp_var.set(f"Conditional BP: {self.conditional_breakpoint_raw if self.conditional_breakpoint_raw else '(none)'}")
 
+        # RAM Hex Dump
         rows = []
         for base in range(0, 256, 16):
             row_values = " ".join(f"{value:02X}" for value in self.cpu.ram[base : base + 16])
@@ -422,6 +590,7 @@ class EmulatorUI:
         self.ram_text.insert("1.0", "\n".join(rows))
         self.ram_text.config(state="disabled")
 
+        # Stack View
         stack_lines = [f"SP=0x{self.cpu.sp:02X} | depth={self.cpu.stack_depth}"]
         max_entries = min(self.cpu.stack_depth, 16)
         for index in range(max_entries):
@@ -435,6 +604,7 @@ class EmulatorUI:
         self.stack_text.insert("1.0", "\n".join(stack_lines))
         self.stack_text.config(state="disabled")
 
+        # Watch View
         watch_lines = []
         for addr in sorted(self.watch_addresses):
             watch_lines.append(f"0x{addr:02X}: 0x{self.cpu.ram[addr]:02X} ({self.cpu.ram[addr]})")
@@ -445,12 +615,21 @@ class EmulatorUI:
         self.watch_text.insert("1.0", "\n".join(watch_lines))
         self.watch_text.config(state="disabled")
 
+        # TTY Console View
+        self.console_text.config(state="normal")
+        self.console_text.delete("1.0", tk.END)
+        self.console_text.insert("1.0", "".join(self.cpu.io_output))
+        self.console_text.config(state="disabled")
+        self.console_text.see(tk.END)
+
+        # Trace View
         self.trace_text.config(state="normal")
         self.trace_text.delete("1.0", tk.END)
         self.trace_text.insert("1.0", "\n".join(self.trace_lines))
         self.trace_text.config(state="disabled")
         self.trace_text.see(tk.END)
 
+        # Live Disassembly View
         disasm_lines, disasm_addrs = self._build_disassembly_lines()
         self.disasm_line_addresses = disasm_addrs
         self.disasm_text.config(state="normal")
@@ -458,20 +637,31 @@ class EmulatorUI:
         self.disasm_text.insert("1.0", "\n".join(disasm_lines))
         self.disasm_text.config(state="disabled")
 
-    def on_assemble_load(self) -> None:
+    def on_assemble_or_compile(self) -> None:
+        source = self.source_text.get("1.0", tk.END)
         try:
-            program = assemble(self.source_text.get("1.0", tk.END))
+            if self.editor_mode == "c":
+                asm_code = compile_c(source)
+                program = assemble(asm_code)
+                msg = f"Mini-C compiled and loaded ({len(program)} bytes)."
+            else:
+                program = assemble(source)
+                msg = f"Assembly assembled and loaded ({len(program)} bytes)."
+
             self.cpu.load_program(program)
             self.running = False
             self.run_to_address = None
             self.phase_fetch_pc = None
             self.trace_lines = []
-            self._set_status(f"Program assembled and loaded ({len(program)} bytes).")
+            self.on_clear_console()
+            self._set_status(msg)
             self.refresh_ui()
         except AssemblerError as exc:
-            self._set_status(str(exc), is_error=True)
+            self._set_status(f"Assembly Error: {exc}", is_error=True)
+        except SyntaxError as exc:
+            self._set_status(f"C Syntax Error: {exc}", is_error=True)
         except Exception as exc:
-            self._set_status(f"Load failed: {exc}", is_error=True)
+            self._set_status(f"Build Failed: {exc}", is_error=True)
 
     def on_reset(self) -> None:
         self.running = False
@@ -479,6 +669,7 @@ class EmulatorUI:
         self.run_to_address = None
         self.phase_fetch_pc = None
         self.trace_lines = []
+        self.on_clear_console()
         self._set_status("CPU reset. RAM cleared.")
         self.refresh_ui()
 
@@ -634,33 +825,44 @@ class EmulatorUI:
     def _run_loop_tick(self) -> None:
         if not self.running:
             return
-        if self.cpu.halted:
-            self.running = False
-            self._set_status("CPU halted.")
-            self.refresh_ui()
-            return
-        if self.run_to_address is not None and self.cpu.pc == self.run_to_address:
-            target = self.run_to_address
-            self.running = False
-            self.run_to_address = None
-            self._set_status(f"Reached run-to address 0x{target:02X}")
-            self.refresh_ui()
-            return
-        if self.cpu.pc in self.breakpoints:
-            bp = self.cpu.pc
-            self.running = False
-            self._set_status(f"Breakpoint hit at 0x{bp:02X}")
-            self.refresh_ui()
-            return
-        if self._conditional_breakpoint_hit():
-            self.running = False
-            self._set_status(f"Conditional breakpoint hit: {self.conditional_breakpoint_raw}")
-            self.refresh_ui()
-            return
+
+        delay_ms, cycles_per_tick = self.speed_modes.get(self.current_speed, (20, 1))
+
         try:
-            self._execute_one_cycle_with_trace()
+            for _ in range(cycles_per_tick):
+                if self.cpu.halted:
+                    self.running = False
+                    self._set_status("CPU halted.")
+                    self.refresh_ui()
+                    return
+
+                if self.run_to_address is not None and self.cpu.pc == self.run_to_address:
+                    target = self.run_to_address
+                    self.running = False
+                    self.run_to_address = None
+                    self._set_status(f"Reached run-to address 0x{target:02X}")
+                    self.refresh_ui()
+                    return
+
+                if self.cpu.pc in self.breakpoints:
+                    bp = self.cpu.pc
+                    self.running = False
+                    self._set_status(f"Breakpoint hit at 0x{bp:02X}")
+                    self.refresh_ui()
+                    return
+
+                if self._conditional_breakpoint_hit():
+                    self.running = False
+                    self._set_status(f"Conditional breakpoint hit: {self.conditional_breakpoint_raw}")
+                    self.refresh_ui()
+                    return
+
+                self._execute_one_cycle_with_trace()
+
             self.refresh_ui()
-            self.root.after(120, self._run_loop_tick)
+            if self.running:
+                self.root.after(delay_ms, self._run_loop_tick)
+
         except Exception as exc:
             self.running = False
             self._set_status(str(exc), is_error=True)

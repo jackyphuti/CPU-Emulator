@@ -4,6 +4,21 @@ __pycache__/
 
 # Virtual environment
 .venv/
+venv/
+ENV/
 
 # VS Code local settings
 .vscode/
+
+# C / C++ build artifacts
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.exe
+c_core/cpu8_cli
+c_core/test_cpu8
+c_core/libcpu8.so
+build/
+bin/
